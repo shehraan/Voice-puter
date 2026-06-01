@@ -1,0 +1,22 @@
+# Windows visible UIA voice agent - runtime dependencies
+# Python 3.11+
+
+# Desktop UI Automation
+pywinauto==0.6.8
+uiautomation==2.0.20
+comtypes==1.4.6
+pywin32==306
+
+# Planner / schema / HTTP to Ollama
+pydantic==2.7.1
+httpx==0.27.0
+
+# Audio front-end (VAD + STT pipeline)
+sounddevice==0.4.6
+soundfile==0.12.1
+numpy==1.26.4
+onnxruntime==1.17.3
+keyboard==0.13.5
+
+# Tests
+pytest==8.2.0
