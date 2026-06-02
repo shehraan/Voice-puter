@@ -1,8 +1,9 @@
 # Runtime artifacts (traces, PTT audio, learned selector cache)
 runtime/
 
-# Model assets fetched by scripts/fetch_models.py
+# Model assets (like that fetched by scripts/fetch_models.py)
 models/
+prompts/
 
 # Python
 __pycache__/
