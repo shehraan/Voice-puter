@@ -63,6 +63,11 @@ Example (open a text editor and type):
 
 Example (search inside an app - ensure the app, find the search field, type the query, THEN submit):
 {{"goal":"generic_search","target_app":"browser","visual_demo_mode":true,"confidence":0.85,"needs_confirmation":false,"rationale_short":"open the browser, type the query into the search field and submit","actions":[{{"op":"ensure_window","target":{{"selector_id":null,"semantic_role":null}},"args":{{"app_name":"browser"}}}},{{"op":"find_control","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{}}}},{{"op":"type_text","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{"text":"mechanical keyboards","clear_first":true}}}},{{"op":"send_hotkey","target":{{"selector_id":null,"semantic_role":null}},"args":{{"keys":"enter"}}}}],"postconditions":[{{"type":"results_appeared","description":"search results are shown","args":{{"contains_any":["mechanical","keyboards"]}}}}]}}
+
+Note on follow_up_action: if the situation includes a follow_up_action (play/open/select), your job is still to perform the SEARCH (find field, type query, submit). The system selects and activates the best matching result afterwards. Focus on getting accurate results on screen.
+
+Example (search a media app and play - just do the search; the system plays the best result):
+{{"goal":"generic_search","target_app":"spotify","visual_demo_mode":true,"confidence":0.85,"needs_confirmation":false,"rationale_short":"open spotify, type the query into search and submit","actions":[{{"op":"ensure_window","target":{{"selector_id":null,"semantic_role":null}},"args":{{"app_name":"spotify"}}}},{{"op":"find_control","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{}}}},{{"op":"type_text","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{"text":"narcos","clear_first":true}}}},{{"op":"send_hotkey","target":{{"selector_id":null,"semantic_role":null}},"args":{{"keys":"enter"}}}}],"postconditions":[{{"type":"results_appeared","description":"search results are shown","args":{{"contains_any":["narcos"]}}}}]}}
 """
 
 
@@ -75,6 +80,7 @@ def build_messages(ctx: PlannerContext) -> list[dict[str, str]]:
         "target_app_guess": hint.target_app,
         "text_or_query": hint.payload,
         "named_control_guess": hint.query,
+        "follow_up_action": hint.then,
         "visual_demo_mode": ctx.visual_demo_mode,
         "current_window": ctx.window,
         "observed_controls": (ctx.observation or {}).get("actionable_controls", []),

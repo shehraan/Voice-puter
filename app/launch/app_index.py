@@ -33,6 +33,11 @@ APP_INDEX: dict[str, dict] = {
         "aliases": ["spotify", "music app", "my music app", "music"],
         "launch": ["spotify"],
         "exe": ["spotify.exe"],
+        # Ctrl+K navigates to Spotify's search page (avoiding the phantom Chromium omnibox
+        # that the CEF accessibility tree always exposes as "Address and search bar"). The
+        # result is then activated explicitly, so Enter alone does not play.
+        "search_shortcut": "ctrl+k",
+        "search_plays_on_enter": False,
     },
     "vscode": {
         "aliases": ["vscode", "vs code", "visual studio code", "code", "codex", "my editor"],
@@ -69,3 +74,15 @@ def lookup(app_name: str) -> tuple[str, dict] | None:
             if alias == low or alias in low or low in alias:
                 return key, entry
     return None
+
+
+def search_shortcut(app_name: str) -> str | None:
+    """Hotkey that focuses/opens the app's own search, if known (discovery metadata)."""
+    indexed = lookup(app_name)
+    return indexed[1].get("search_shortcut") if indexed else None
+
+
+def search_plays_on_enter(app_name: str) -> bool:
+    """True when submitting the app's quick-search plays the top result directly."""
+    indexed = lookup(app_name)
+    return bool(indexed[1].get("search_plays_on_enter")) if indexed else False

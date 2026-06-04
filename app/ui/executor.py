@@ -7,6 +7,7 @@ No pixel coordinates, no blind clicks, no typing into an unverified window
 """
 from __future__ import annotations
 
+import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -15,11 +16,13 @@ import keyboard
 import win32gui
 from pywinauto.controls.uiawrapper import UIAWrapper
 from pywinauto.uia_defines import get_elem_interface
+from pywinauto.uia_element_info import UIAElementInfo
 
 from app.cache.selector_cache import SelectorCache
 from app.core.config import Config
 from app.core.trace import Trace
 from app.launch.resolver import AppResolver, ActiveWindow, set_foreground
+from app.launch.windows import chromium_render_children, enable_chromium_accessibility
 from app.safety import guardrails
 from app.planner.schema import Action
 from app.ui.elements import Observation, UIElement
@@ -48,15 +51,47 @@ class Executor:
         self.observation: Observation | None = None
         self._last_target: UIElement | None = None
         self._used: list[tuple[str, UIElement, bool]] = []
+        self._a11y_nudged: set[int] = set()
 
     # ---- observation -------------------------------------------------------
     def observe(self) -> Observation | None:
         if not self.window:
             return None
+        top = self.window.hwnd
         try:
-            self.observation = observe_window(self.window.info, self.cfg.loop)
+            obs = observe_window(self.window.info, self.cfg.loop)
         except Exception as exc:  # transient UIA/COM failure: keep last observation
             self.trace.log("observe_error", detail=str(exc))
+            return self.observation
+
+        # Chromium/Electron apps (Spotify, Discord, browsers) expose their web content on
+        # a renderer child window, not the frame. Merge the frame (omnibox, tabs, native
+        # chrome) with the renderer children (real search box, results) into one
+        # observation so grounding can see everything.
+        renders = chromium_render_children(top)
+        if renders:
+            if top not in self._a11y_nudged:
+                enable_chromium_accessibility(top)
+                self._a11y_nudged.add(top)
+                time.sleep(0.3)
+            merged = list(obs.elements)
+            seen = {e.runtime_id for e in merged if e.runtime_id}
+            for h in renders:
+                try:
+                    cand = observe_window(UIAElementInfo(h), self.cfg.loop)
+                except Exception:
+                    continue
+                for e in cand.elements:
+                    if e.runtime_id and e.runtime_id in seen:
+                        continue
+                    seen.add(e.runtime_id)
+                    merged.append(e)
+            registry: dict[str, UIElement] = {}
+            for i, e in enumerate(merged):
+                e.selector_id = f"obs_{i}"
+                registry[e.selector_id] = e
+            obs = Observation(window=obs.window, elements=merged, registry=registry)
+        self.observation = obs
         return self.observation
 
     def app_key(self) -> str:
@@ -105,6 +140,169 @@ class Executor:
         self._last_target = el
         self._used.append((role, el, False))
         return el
+
+    # ---- result selection / activation -------------------------------------
+    def find_best_result(self, query: str) -> UIElement | None:
+        """Pick the best visible result control matching the query.
+
+        Considers both result-like rows (ListItem/DataItem/Hyperlink) and clickable
+        action buttons whose name matches the query (e.g. a 'Play Narcos' button), then
+        scores by query-term overlap. Grounded purely in the current observation.
+        """
+        if not self.observation:
+            return None
+        terms = [w for w in re.split(r"\W+", (query or "").lower()) if len(w) > 1]
+        candidates: list[tuple[float, UIElement]] = []
+        for e in self.observation.elements:
+            if e.is_offscreen or not e.is_enabled:
+                continue
+            name = (e.name or "").lower()
+            term_hits = sum(1 for t in terms if t in name)
+            is_rowish = e.control_type in ("ListItem", "DataItem", "TreeItem", "Hyperlink")
+            is_clickable = e.control_type in ("Button", "SplitButton", "MenuItem") and "Invoke" in e.supported_patterns
+            if term_hits == 0 and not is_rowish:
+                continue
+            score = term_hits * 3.0
+            if is_rowish:
+                score += 2.0
+            if is_clickable:
+                score += 1.0
+                if name.startswith(("play", "open")):
+                    score += 2.5
+            if score <= 0:
+                continue
+            candidates.append((score, e))
+        if not candidates:
+            return None
+        candidates.sort(key=lambda c: c[0], reverse=True)
+        el = candidates[0][1]
+        self._last_target = el
+        self._used.append(("result_item", el, False))
+        return el
+
+    def _find_search_field(self) -> UIElement | None:
+        """The app's real search input, ignoring the phantom Chromium omnibox."""
+        if not self.observation:
+            return None
+        best, best_score = None, 0.0
+        for e in self.observation.elements:
+            if e.control_type not in ("Edit", "ComboBox") or "Value" not in e.supported_patterns:
+                continue
+            nl = (e.name or "").lower()
+            if nl == "address and search bar":  # Chromium phantom omnibox
+                continue
+            score = 5.0 if e.control_type == "ComboBox" else 4.0
+            if any(k in nl for k in ("what do you want", "search", "find", "query")):
+                score += 3.0
+            if e.has_keyboard_focus:
+                score += 1.0
+            if e.is_enabled and not e.is_offscreen:
+                score += 0.5
+            if score > best_score:
+                best, best_score = e, score
+        return best
+
+    def search_via_shortcut(self, shortcut: str, query: str) -> ActionResult:
+        """Open the app's own search via its hotkey and type the query.
+
+        Used for Chromium/Electron apps (e.g. Spotify Ctrl+K) whose real search box is
+        not reliably exposed until navigated to. The window is verified foreground, the
+        shortcut opens the app's search page, and we ground onto the real search field.
+        """
+        if not query:
+            return ActionResult("search_via_shortcut", False, "no query to search")
+        if not self._ensure_foreground():
+            return ActionResult("search_via_shortcut", False, "target window not foreground")
+
+        # Put keyboard focus inside the web content so the app's shortcut is not swallowed
+        # by the native frame (common for Chromium/Electron apps after foregrounding).
+        self.observe()
+        doc = next((e for e in (self.observation.elements if self.observation else [])
+                    if e.control_type == "Document"), None)
+        if doc is not None:
+            try:
+                UIAWrapper(doc.info).set_focus()
+            except Exception:
+                pass
+            time.sleep(0.2)
+        keyboard.send(shortcut.replace(" ", ""))
+
+        # Wait for the search page to render and expose its real search field.
+        el = None
+        deadline = time.time() + 3.0
+        while time.time() < deadline:
+            time.sleep(0.4)
+            self.observe()
+            el = self._find_search_field()
+            if el is not None:
+                break
+
+        where = "search field"
+        if el is not None:
+            verdict = guardrails.check_element_target(el)
+            if not verdict.allowed:
+                return ActionResult("search_via_shortcut", False, verdict.reason)
+            self._focus_element(el)
+            where = el.name or where
+
+        # Prefer atomic ValuePattern.SetValue() so multi-word queries land in full.
+        # Fall back to keyboard only when the control doesn't support ValuePattern.
+        method = ""
+        if el is not None and "Value" in el.supported_patterns:
+            try:
+                self._pattern(el, "Value").SetValue(query)
+                method = "set_value"
+            except Exception:
+                method = ""
+
+        if not method:
+            # Clear whatever text is already in the field before typing.
+            keyboard.send("ctrl+a")
+            time.sleep(0.12)
+            keyboard.send("delete")
+            time.sleep(0.12)
+            keyboard.write(query, delay=self.cfg.timing.type_char_delay_s)
+            method = "keyboard"
+
+        time.sleep(self.cfg.timing.after_action_ms / 1000.0)
+        return ActionResult("search_via_shortcut", True, f"typed {query!r} via {method} into {where!r}",
+                            {"selector_id": el.selector_id if el else None})
+
+    def activate_best_result(self, query: str, mode: str = "open") -> ActionResult:
+        """Find the best result for the query and visibly activate it (play/open/select)."""
+        self.observe()
+        el = self.find_best_result(query)
+        if el is None:
+            return ActionResult("activate_result", False, f"no result matched {query!r}")
+        verdict = guardrails.check_element_target(el)
+        if not verdict.allowed:
+            return ActionResult("activate_result", False, verdict.reason)
+        if not self._ensure_foreground():
+            return ActionResult("activate_result", False, "target window not foreground")
+        self._focus_element(el)
+        if mode == "select":
+            try:
+                self._pattern(el, "SelectionItem").Select()
+            except Exception:
+                pass
+            time.sleep(self.cfg.timing.after_action_ms / 1000.0)
+            return ActionResult("activate_result", True, f"selected {el.name!r}", {"selector_id": el.selector_id})
+        # play / open: clickable buttons/links are invoked directly; list/result rows
+        # are activated with focus + Enter (the universal "open selected item" gesture).
+        method = ""
+        clickable = "Invoke" in el.supported_patterns and el.control_type in ("Button", "Hyperlink", "MenuItem", "SplitButton")
+        if clickable:
+            try:
+                self._pattern(el, "Invoke").Invoke()
+                method = "invoke"
+            except Exception:
+                method = ""
+        if not method:
+            self._focus_element(el)
+            keyboard.send("enter")
+            method = "enter"
+        time.sleep(self.cfg.timing.after_action_ms / 1000.0)
+        return ActionResult("activate_result", True, f"activated {el.name!r} via {method}", {"selector_id": el.selector_id})
 
     # ---- cache flush -------------------------------------------------------
     def flush_cache(self, success: bool) -> None:

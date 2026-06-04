@@ -30,7 +30,7 @@ class VisualTiming:
 @dataclass
 class PlannerConfig:
     base_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
-    model: str = field(default_factory=lambda: os.environ.get("AGENT_PLANNER_MODEL", "qwen2.5:7b-instruct"))
+    model: str = field(default_factory=lambda: os.environ.get("AGENT_PLANNER_MODEL", "qwen2.5:14b-instruct"))
     temperature: float = 0.2
     request_timeout_s: float = 60.0
 

@@ -88,6 +88,90 @@ def _significant_terms(payload: str | None) -> list[str]:
     return sorted(terms, key=len, reverse=True)
 
 
+_RESULT_TYPES = {"ListItem", "DataItem", "TreeItem", "Hyperlink"}
+_INPUT_TYPES = {"Edit", "ComboBox", "Document"}
+
+
+def search_results_present(obs: Observation | None, query: str | None) -> bool:
+    """True when a submitted search appears to have produced results.
+
+    Looks for result-like rows or the query terms appearing in a non-input control
+    (i.e. somewhere other than the field we typed into).
+    """
+    if obs is None:
+        return False
+    if any(e.control_type in _RESULT_TYPES for e in obs.elements):
+        return True
+    terms = _significant_terms(query) or _terms(query)
+    if not terms:
+        return False
+    for e in obs.elements:
+        if e.control_type in _INPUT_TYPES:
+            continue
+        if any(t in _element_text(e) for t in terms):
+            return True
+    return False
+
+
+def media_is_playing(obs: Observation | None) -> bool:
+    """A visible Pause control implies media is currently playing."""
+    if obs is None:
+        return False
+    for e in obs.elements:
+        n = (e.name or "").lower()
+        if e.control_type in ("Button", "SplitButton") and "pause" in n:
+            return True
+    return False
+
+
+def _now_playing_text(obs: Observation) -> str:
+    """Text from controls that look like a 'now playing' bar/area, lowercased."""
+    parts = []
+    for e in obs.elements:
+        n = (e.name or "").lower()
+        # Spotify/media apps surface "Now playing: <track>" or "Group Now playing bar"
+        if "now playing" in n or (e.control_type == "Group" and "playing" in n):
+            parts.append(n)
+    return " ".join(parts)
+
+
+def result_activated(hint, obs: Observation | None) -> VerifyResult:
+    """Confirm a follow-up action (play/open/select) on a search result took effect.
+
+    For 'play': requires genuine playback evidence (pause button visible, or the
+    now-playing bar / window title reflects the query). Query terms merely appearing
+    in result rows on the search page do NOT count as playback.
+
+    For 'open'/'select': the window title or a selected/focused result suffices.
+    """
+    if obs is None:
+        return VerifyResult(False, "no observation yet")
+    query = getattr(hint, "payload", None) or ""
+    terms = _significant_terms(query) or _terms(query)
+    title = (obs.window.title or "").lower()
+    then = getattr(hint, "then", None)
+
+    if then == "play":
+        if media_is_playing(obs):
+            return VerifyResult(True, "media playing (pause control visible)")
+        if terms and any(t in title for t in terms):
+            return VerifyResult(True, "now-playing title reflects the query")
+        np_text = _now_playing_text(obs)
+        if np_text and terms and any(t in np_text for t in terms):
+            return VerifyResult(True, "now-playing bar reflects the query")
+        return VerifyResult(False, "no playback evidence yet")
+
+    # open / select: title change or focused result row is sufficient
+    if terms and any(t in title for t in terms):
+        return VerifyResult(True, "opened item reflects the query (title)")
+    if any(e.has_keyboard_focus and e.control_type in _RESULT_TYPES for e in obs.elements):
+        return VerifyResult(True, "a result row is selected/focused")
+    text = _haystack(obs)
+    if terms and any(t in text for t in terms):
+        return VerifyResult(True, "query content visible")
+    return VerifyResult(False, "no activation evidence yet")
+
+
 def goal_satisfied(hint, obs: Observation | None, baseline: Observation | None) -> VerifyResult | None:
     """Authoritative, goal-derived completion check owned by the loop.
 

@@ -5,12 +5,19 @@ any planning/automation logic.
 """
 from __future__ import annotations
 
+import ctypes
 import os
 from dataclasses import dataclass
 
 import win32con
 import win32gui
 import win32process
+
+# Chromium/Electron/CEF host + renderer window classes. The real accessibility tree
+# of these apps lives on the renderer child window, not the top-level frame.
+_CHROMIUM_RENDER_CLASSES = ("Chrome_RenderWidgetHostHWND",)
+_WM_GETOBJECT = 0x003D
+_UIA_ROOT_OBJECT_ID = ctypes.c_long(-25).value
 
 
 @dataclass
@@ -65,3 +72,48 @@ def list_windows() -> list[WindowInfo]:
 
     win32gui.EnumWindows(_cb, None)
     return results
+
+
+def child_windows(hwnd: int) -> list[int]:
+    out: list[int] = []
+
+    def _cb(h: int, _) -> bool:
+        out.append(h)
+        return True
+
+    try:
+        win32gui.EnumChildWindows(hwnd, _cb, None)
+    except Exception:
+        pass
+    return out
+
+
+def chromium_render_children(hwnd: int) -> list[int]:
+    """Renderer child windows of a Chromium/Electron/CEF app (Spotify, Discord, etc.)."""
+    found: list[int] = []
+    for h in child_windows(hwnd):
+        try:
+            if win32gui.GetClassName(h) in _CHROMIUM_RENDER_CLASSES:
+                found.append(h)
+        except Exception:
+            continue
+    return found
+
+
+def enable_chromium_accessibility(hwnd: int) -> None:
+    """Nudge a Chromium app to expose its full UIA tree.
+
+    Chromium keeps its renderer accessibility tree off until an assistive-tech client
+    asks for it. Sending WM_GETOBJECT(UiaRootObjectId) to the frame and its renderer
+    children turns it on. Harmless for non-Chromium windows.
+    """
+    user32 = ctypes.windll.user32
+    result = ctypes.c_ulong()
+    for h in [hwnd, *chromium_render_children(hwnd)]:
+        try:
+            user32.SendMessageTimeoutW(
+                h, _WM_GETOBJECT, 0, _UIA_ROOT_OBJECT_ID,
+                win32con.SMTO_ABORTIFHUNG, 800, ctypes.byref(result),
+            )
+        except Exception:
+            continue
