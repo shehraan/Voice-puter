@@ -6,6 +6,7 @@ cannot be confirmed, the loop must repair or stop (architecture.md / testing.md)
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -27,18 +28,24 @@ def read_value(element: UIElement) -> str:
     if com is None:
         return ""
     try:
+        direct = com.CurrentValue
+        if isinstance(direct, str) and direct:
+            return direct
+    except Exception:
+        pass
+    try:
         iface = get_elem_interface(com, "Value")
         val = iface.CurrentValue
-        if val:
-            return str(val)
+        if isinstance(val, str) and val:
+            return val
     except Exception:
         pass
     try:
         iface = get_elem_interface(com, "Text")
         rng = iface.DocumentRange
         txt = rng.GetText(-1)
-        if txt:
-            return str(txt)
+        if isinstance(txt, str) and txt:
+            return txt
     except Exception:
         pass
     return ""
@@ -91,20 +98,209 @@ def _significant_terms(payload: str | None) -> list[str]:
 _RESULT_TYPES = {"ListItem", "DataItem", "TreeItem", "Hyperlink"}
 _INPUT_TYPES = {"Edit", "ComboBox", "Document"}
 
+# Element-name prefixes that indicate a navigation/command suggestion ("Search for X",
+# "Go to Y") rather than an actual content result. Kept in sync with
+# Executor._NAV_SUGGESTION_PREFIXES.
+_NAV_SUGGESTION_PREFIXES = (
+    "search for ", "go to ", "show ", "browse ", "see all ", "more results",
+    "show more", "all results", "view all",
+)
+
+
+def _is_nav_name(name: str) -> bool:
+    n = (name or "").strip().lower()
+    return any(n.startswith(p) for p in _NAV_SUGGESTION_PREFIXES)
+
+
+_SIDEBAR_NAMES = frozenset({"home", "favorites", "albums", "tracks", "artists", "genres"})
+
+
+def _sidebar_boundary(obs: Observation) -> int | None:
+    """X coordinate separating a left nav sidebar from main content, if present."""
+    if not obs.elements:
+        return None
+    positioned = [
+        e for e in obs.elements
+        if e.control_type not in ("Window", "Document")
+    ]
+    if not positioned:
+        return None
+    xs = [e.rectangle[0] for e in positioned]
+    left, right = min(xs), max(e.rectangle[2] for e in positioned)
+    width = max(right - left, 1)
+    left_cutoff = left + int(width * 0.30)
+    sidebar_links = [
+        e for e in positioned
+        if e.control_type == "Hyperlink"
+        and (e.name or "").strip().lower() in _SIDEBAR_NAMES
+        and e.rectangle[1] >= 260
+        and e.rectangle[0] < left_cutoff
+    ]
+    if len(sidebar_links) < 3:
+        return None
+    has_content = any(
+        e.rectangle[0] >= left_cutoff
+        for e in obs.elements
+        if e.control_type not in ("Window",)
+    )
+    if not has_content:
+        return None
+    return left_cutoff
+
+
+def _content_elements(obs: Observation) -> list:
+    boundary = _sidebar_boundary(obs)
+    if boundary is None:
+        return list(obs.elements)
+    return [e for e in obs.elements if e.rectangle[0] > boundary]
+
+
+def _on_search_route(obs: Observation | None) -> bool:
+    """True when the Chromium document URL indicates a search-results route."""
+    if obs is None:
+        return False
+    for e in obs.elements:
+        if e.control_type == "Document":
+            val = (read_value(e) or "").lower()
+            if "search/song" in val or "#/search" in val:
+                return True
+    return False
+
+
+def _named_header_search_edits(obs: Observation) -> list[UIElement]:
+    """App-wide search inputs (named 'Search'), not phantom header omniboxes."""
+    return [
+        e for e in obs.elements
+        if e.control_type in ("Edit", "ComboBox")
+        and (e.name or "").strip().lower() == "search"
+        and e.rectangle[1] < 120
+    ]
+
+
+def _dropdown_nav_visible(obs: Observation | None, query: str | None) -> bool:
+    """True when a live-search nav row ('Search for X') is still on screen."""
+    if obs is None or not query:
+        return False
+    content = _content_elements(obs)
+    search_tabs = {
+        (e.name or "").strip().lower()
+        for e in content
+        if e.control_type in ("Hyperlink", "TabItem", "Button")
+        and e.rectangle[1] < 260
+    }
+    if {"tracks", "albums", "artists"}.issubset(search_tabs):
+        return False
+    terms = [t for t in query.lower().split() if len(t) > 1]
+    for e in obs.elements:
+        if e.control_type not in ("ListItem", "Hyperlink", "DataItem"):
+            continue
+        if e.rectangle[1] > 240:
+            continue
+        name = (e.name or "").strip().lower()
+        if not name.startswith("search for "):
+            continue
+        if terms and any(t in name for t in terms):
+            return True
+    return False
+
+
+def search_results_page_visible(obs: Observation | None, query: str | None = None) -> bool:
+    """True when the app is on a full search-results page (not a live-search dropdown).
+
+    Detects results tabs, Document search routes, or a query in the header search band
+    together with numbered table rows in the main content pane (common in Chromium apps
+    where track titles are not exposed as named UIA elements).
+    """
+    if obs is None:
+        return False
+    content = _content_elements(obs)
+    # Search-page tabs live in the header band of the content pane, not the sidebar.
+    search_tabs = {
+        (e.name or "").strip().lower()
+        for e in content
+        if e.control_type in ("Hyperlink", "TabItem", "Button")
+        and e.rectangle[1] < 260
+    }
+    if {"tracks", "albums", "artists"}.issubset(search_tabs):
+        return True
+    terms = [t for t in (query or "").lower().split() if len(t) > 1]
+    content_row = False
+    header_query = False
+    if terms:
+        header_query = any(
+            any(t in _element_text(e) for t in terms)
+            for e in _named_header_search_edits(obs)
+        )
+        content_row = any(
+            e.control_type == "Button"
+            and (e.name or "").strip().isdigit()
+            and 180 < e.rectangle[1] < 880
+            and e in content
+            for e in obs.elements
+        )
+        if header_query and content_row:
+            return True
+    has_datagrid = any(
+        e.control_type == "DataGrid" and e in content for e in obs.elements
+    )
+    in_dropdown = query and _dropdown_nav_visible(obs, query)
+    if _on_search_route(obs) and not in_dropdown:
+        if playable_result_present(obs, query) or content_row:
+            return True
+        if {"tracks", "albums", "artists"}.issubset(search_tabs):
+            return True
+        if has_datagrid and (not terms or header_query):
+            return True
+    return False
+
+
+def results_ready_for_followup(obs: Observation | None, query: str | None) -> bool:
+    """Search phase is done — a follow-up action (play/open/select) can proceed."""
+    return playable_result_present(obs, query) or search_results_page_visible(obs, query)
+
+
+def playable_result_present(obs: Observation | None, query: str | None) -> bool:
+    """True when an ACTUAL content result (not a navigation suggestion) matches the query.
+
+    Stricter than search_results_present: a dropdown showing only 'Search for X' does
+    NOT count — that element merely routes to the results page.
+    """
+    if obs is None:
+        return False
+    terms = _significant_terms(query) or _terms(query)
+    if not terms:
+        return any(
+            e.control_type in _RESULT_TYPES and not _is_nav_name(e.name)
+            for e in obs.elements
+        )
+    on_search = _on_search_route(obs)
+    for e in obs.elements:
+        if e.control_type in _INPUT_TYPES:
+            continue
+        if _is_nav_name(e.name):
+            continue
+        name_l = (e.name or "").strip().lower()
+        if any(t in name_l for t in terms):
+            return True
+        if on_search and any(t in _element_text(e) for t in terms):
+            if e.control_type in _RESULT_TYPES:
+                return True
+    return False
+
 
 def search_results_present(obs: Observation | None, query: str | None) -> bool:
     """True when a submitted search appears to have produced results.
 
-    Looks for result-like rows or the query terms appearing in a non-input control
-    (i.e. somewhere other than the field we typed into).
+    Requires query terms to appear in a non-input element, OR in a result-type
+    element. Pure presence of Hyperlink/ListItem elements (e.g. sidebar playlists
+    in Feishin) is NOT sufficient — those exist before any search runs.
     """
     if obs is None:
         return False
-    if any(e.control_type in _RESULT_TYPES for e in obs.elements):
-        return True
     terms = _significant_terms(query) or _terms(query)
     if not terms:
-        return False
+        # No query terms — fall back to presence of any result-type element.
+        return any(e.control_type in _RESULT_TYPES for e in obs.elements)
     for e in obs.elements:
         if e.control_type in _INPUT_TYPES:
             continue
@@ -114,13 +310,19 @@ def search_results_present(obs: Observation | None, query: str | None) -> bool:
 
 
 def media_is_playing(obs: Observation | None) -> bool:
-    """A visible Pause control implies media is currently playing."""
+    """A visible Pause control or advancing player bar implies media is playing."""
     if obs is None:
         return False
     for e in obs.elements:
         n = (e.name or "").lower()
         if e.control_type in ("Button", "SplitButton") and "pause" in n:
             return True
+        if e.control_type == "Group" and "player" in n and "0:00" not in n and ":" in n:
+            return True
+        if e.control_type == "Button" and re.match(r"^\d+:\d{2}$", (e.name or "").strip()):
+            mins, secs = (e.name or "").strip().split(":", 1)
+            if int(mins) > 0 or int(secs) > 2:
+                return True
     return False
 
 
@@ -133,6 +335,33 @@ def _now_playing_text(obs: Observation) -> str:
         if "now playing" in n or (e.control_type == "Group" and "playing" in n):
             parts.append(n)
     return " ".join(parts)
+
+
+def _player_bar_text(obs: Observation) -> str:
+    """Lowercased text from the bottom now-playing / transport band."""
+    parts: list[str] = []
+    for e in obs.elements:
+        if e.rectangle[1] < 850:
+            continue
+        parts.append((e.name or "").lower())
+        parts.append(read_value(e).lower())
+    return " ".join(parts)
+
+
+def _now_playing_reflects_query(obs: Observation, terms: list[str], title: str) -> bool:
+    """True when the active transport/title shows the requested track — not merely typed in search."""
+    if not terms:
+        return False
+    tl = title.lower()
+    if ("playing" in tl or "paused" in tl) and any(t in tl for t in terms):
+        return True
+    bar = _player_bar_text(obs)
+    if bar and any(t in bar for t in terms):
+        return True
+    np_text = _now_playing_text(obs)
+    if np_text and any(t in np_text for t in terms):
+        return True
+    return False
 
 
 def result_activated(hint, obs: Observation | None) -> VerifyResult:
@@ -152,14 +381,17 @@ def result_activated(hint, obs: Observation | None) -> VerifyResult:
     then = getattr(hint, "then", None)
 
     if then == "play":
-        if media_is_playing(obs):
-            return VerifyResult(True, "media playing (pause control visible)")
-        if terms and any(t in title for t in terms):
-            return VerifyResult(True, "now-playing title reflects the query")
-        np_text = _now_playing_text(obs)
-        if np_text and terms and any(t in np_text for t in terms):
-            return VerifyResult(True, "now-playing bar reflects the query")
-        return VerifyResult(False, "no playback evidence yet")
+        reflects = _now_playing_reflects_query(obs, terms, title)
+        if reflects and ("playing" in title or media_is_playing(obs)):
+            return VerifyResult(True, "now playing the requested track")
+        if reflects and "playing" in title:
+            return VerifyResult(True, "window title shows playing with query")
+        return VerifyResult(
+            False,
+            "playback controls visible but now-playing does not show the requested track"
+            if media_is_playing(obs)
+            else "no playback evidence for the requested track",
+        )
 
     # open / select: title change or focused result row is sufficient
     if terms and any(t in title for t in terms):
@@ -170,6 +402,23 @@ def result_activated(hint, obs: Observation | None) -> VerifyResult:
     if terms and any(t in text for t in terms):
         return VerifyResult(True, "query content visible")
     return VerifyResult(False, "no activation evidence yet")
+
+
+def message_sent(hint, obs: Observation | None) -> VerifyResult:
+    """Verify a message was delivered: it appears in the chat (visible text) or the
+    compose field is now empty after a non-empty compose state."""
+    if obs is None:
+        return VerifyResult(False, "no observation yet")
+    msg = getattr(hint, "message", None) or ""
+    if not msg:
+        return VerifyResult(True, "no message text to verify")
+    terms = [w for w in msg.lower().split() if len(w) > 2]
+    text = _haystack(obs)
+    # Message text visible in chat history (non-compose elements)
+    hits = [t for t in terms if t in text]
+    if len(hits) >= max(1, len(terms) // 2):
+        return VerifyResult(True, f"message text visible in chat: {hits}")
+    return VerifyResult(False, "message text not yet confirmed in chat")
 
 
 def goal_satisfied(hint, obs: Observation | None, baseline: Observation | None) -> VerifyResult | None:
