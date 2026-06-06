@@ -29,10 +29,42 @@ class VisualTiming:
 
 @dataclass
 class PlannerConfig:
+    # "ollama" (default) or "openai" — set AGENT_PLANNER_PROVIDER or pass --openai to run_text
+    provider: str = field(
+        default_factory=lambda: os.environ.get("AGENT_PLANNER_PROVIDER", "ollama").strip().lower()
+    )
     base_url: str = field(default_factory=lambda: os.environ.get("OLLAMA_HOST", "http://localhost:11434"))
     model: str = field(default_factory=lambda: os.environ.get("AGENT_PLANNER_MODEL", "qwen2.5:14b-instruct"))
     temperature: float = 0.2
     request_timeout_s: float = 60.0
+    # OpenAI Responses API (GPT-5.x reasoning models)
+    openai_base_url: str = field(
+        default_factory=lambda: os.environ.get("OPENAI_BASE_URL", "https://api.openai.com/v1")
+    )
+    openai_api_key: str | None = field(default_factory=lambda: os.environ.get("OPENAI_API_KEY"))
+    openai_model: str = field(default_factory=lambda: os.environ.get("AGENT_OPENAI_MODEL", "gpt-5.4"))
+    openai_reasoning_effort: str = field(
+        default_factory=lambda: os.environ.get("AGENT_OPENAI_REASONING_EFFORT", "high").strip().lower()
+    )
+    openai_max_output_tokens: int = field(
+        default_factory=lambda: int(os.environ.get("AGENT_OPENAI_MAX_OUTPUT_TOKENS", "16000"))
+    )
+    openai_request_timeout_s: float = field(
+        default_factory=lambda: float(os.environ.get("AGENT_OPENAI_REQUEST_TIMEOUT_S", "180"))
+    )
+    consensus_agents: int = field(
+        default_factory=lambda: int(os.environ.get("AGENT_CONSENSUS_AGENTS", "3"))
+    )
+    consensus_min_votes: int = field(
+        default_factory=lambda: int(os.environ.get("AGENT_CONSENSUS_MIN_VOTES", "2"))
+    )
+    consensus_min_confidence: float = field(
+        default_factory=lambda: float(os.environ.get("AGENT_CONSENSUS_MIN_CONFIDENCE", "0.5"))
+    )
+    consensus_enabled: bool = field(
+        default_factory=lambda: os.environ.get("AGENT_CONSENSUS_ENABLED", "1").strip().lower()
+        not in ("0", "false", "no")
+    )
 
 
 @dataclass
@@ -57,7 +89,7 @@ class AudioConfig:
 class LoopConfig:
     max_iterations: int = 8
     repair_budget: int = 3
-    observe_max_controls: int = 40
+    observe_max_controls: int = 280
     observe_max_depth: int = 12
     wait_default_ms: int = 4000
     wait_poll_ms: int = 150
@@ -77,7 +109,23 @@ class Config:
             d.mkdir(parents=True, exist_ok=True)
 
 
+def _load_dotenv() -> None:
+    path = REPO_ROOT / ".env"
+    if not path.is_file():
+        return
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        key = key.strip()
+        value = value.strip().strip("'").strip('"')
+        if key and key not in os.environ:
+            os.environ[key] = value
+
+
 def load_config() -> Config:
+    _load_dotenv()
     cfg = Config()
     cfg.ensure_dirs()
     return cfg
