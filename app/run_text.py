@@ -20,6 +20,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--no-demo", action="store_true", help="disable visual_demo_mode (allow hidden fallbacks)")
     parser.add_argument("--yes", action="store_true", help="auto-confirm confirmation-required actions")
     parser.add_argument("--stub", action="store_true", help="use the deterministic stub planner (no Ollama)")
+    parser.add_argument(
+        "--openai",
+        action="store_true",
+        help="use OpenAI GPT-5.4 with high reasoning (OPENAI_API_KEY required)",
+    )
+    parser.add_argument(
+        "--live",
+        action="store_true",
+        help="stream each step to stderr as it happens (actions, plans, waits)",
+    )
     args = parser.parse_args(argv)
 
     cfg = load_config()
@@ -27,8 +37,12 @@ def main(argv: list[str] | None = None) -> int:
         cfg.visual_demo_mode = False
     if args.yes:
         cfg.auto_confirm = True
+    if args.openai:
+        cfg.planner.provider = "openai"
 
-    trace = Trace(transcript=args.command)
+    trace = Trace(transcript=args.command, live=args.live)
+    if args.live:
+        print(f"live log: {args.command!r}", file=sys.stderr, flush=True)
 
     # Lazy import so scaffold/no_op smoke test works before heavy deps are installed.
     if args.command.strip().lower() == "no_op":
@@ -42,11 +56,16 @@ def main(argv: list[str] | None = None) -> int:
 
     from app.core.loop import run_command
 
-    planner = None
-    if args.stub:
-        from app.planner.stub_planner import StubPlanner
+    from app.planner.factory import make_planner
 
-        planner = StubPlanner()
+    planner = make_planner(cfg.planner, stub=args.stub)
+    if args.openai and not args.stub:
+        agents = cfg.planner.consensus_agents if cfg.planner.consensus_enabled else 1
+        print(
+            f"planner: OpenAI {cfg.planner.openai_model} "
+            f"(reasoning={cfg.planner.openai_reasoning_effort}, consensus={agents} agents)",
+            file=sys.stderr,
+        )
 
     def _confirm(reason: str) -> bool:
         try:

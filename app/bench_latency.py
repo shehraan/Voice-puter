@@ -45,9 +45,9 @@ def main(argv: list[str] | None = None) -> int:
     ctx = PlannerContext(transcript=cmd, normalized=norm, goal_hint=hint,
                          observation=obs.to_compact(), window=obs.window.to_dict())
     try:
-        from app.planner.ollama_planner import OllamaPlanner
+        from app.planner.factory import make_planner
 
-        planner = OllamaPlanner(cfg.planner)
+        planner = make_planner(cfg.planner)
         t_warm, _ = _ms(lambda: planner.plan(ctx))   # warm the model
         t_plan, _ = _ms(lambda: planner.plan(ctx))
         print(f"planner first (cold)   : {t_warm:7.1f} ms")

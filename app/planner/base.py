@@ -19,6 +19,8 @@ class PlannerContext:
     cache_candidates: list[dict[str, Any]] = field(default_factory=list)
     previous_result: str | None = None
     memory: dict[str, Any] = field(default_factory=dict)
+    consensus_agent_index: int | None = None
+    consensus_agent_count: int | None = None
 
 
 class Planner(Protocol):

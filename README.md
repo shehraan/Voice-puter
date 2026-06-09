@@ -52,6 +52,13 @@ python -m venv .venv
 # Use stub planner (no Ollama needed — good for testing)
 .venv\Scripts\python -m app.run_text "open notepad and type hello world" --stub
 
+# Use OpenAI GPT-5.4 with high reasoning (compare vs local Ollama)
+# Set OPENAI_API_KEY in .env first
+.venv\Scripts\python -m app.run_text "open notepad and type hello world" --openai
+
+# Stream live step-by-step logging to the terminal
+.venv\Scripts\python -m app.run_text "open notepad and type hello" --live
+
 # Auto-confirm dangerous actions
 .venv\Scripts\python -m app.run_text "..." --yes
 
@@ -78,8 +85,14 @@ Key settings in `app/core/config.py`. Override via environment variables:
 
 | Variable | Default | Description |
 |---|---|---|
+| `AGENT_PLANNER_PROVIDER` | `ollama` | `ollama` or `openai` |
 | `AGENT_PLANNER_MODEL` | `qwen2.5:7b-instruct` | Ollama model |
 | `OLLAMA_HOST` | `http://localhost:11434` | Ollama URL |
+| `OPENAI_API_KEY` | — | Required for OpenAI planner |
+| `AGENT_OPENAI_MODEL` | `gpt-5.4` | OpenAI model id |
+| `AGENT_OPENAI_REASONING_EFFORT` | `high` | `none`, `low`, `medium`, `high`, or `xhigh` |
+| `AGENT_OPENAI_MAX_OUTPUT_TOKENS` | `16000` | Cap for reasoning + output tokens |
+| `OPENAI_BASE_URL` | `https://api.openai.com/v1` | API base (proxies / Azure-style gateways) |
 | `WHISPER_BIN` | `models/whisper-cli.exe` | whisper.cpp binary |
 | `WHISPER_MODEL` | `models/ggml-base.en.bin` | whisper model |
 

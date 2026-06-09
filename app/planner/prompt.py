@@ -64,10 +64,16 @@ Example (open a text editor and type):
 Example (search inside an app - ensure the app, find the search field, type the query, THEN submit):
 {{"goal":"generic_search","target_app":"browser","visual_demo_mode":true,"confidence":0.85,"needs_confirmation":false,"rationale_short":"open the browser, type the query into the search field and submit","actions":[{{"op":"ensure_window","target":{{"selector_id":null,"semantic_role":null}},"args":{{"app_name":"browser"}}}},{{"op":"find_control","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{}}}},{{"op":"type_text","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{"text":"mechanical keyboards","clear_first":true}}}},{{"op":"send_hotkey","target":{{"selector_id":null,"semantic_role":null}},"args":{{"keys":"enter"}}}}],"postconditions":[{{"type":"results_appeared","description":"search results are shown","args":{{"contains_any":["mechanical","keyboards"]}}}}]}}
 
-Note on follow_up_action: if the situation includes a follow_up_action (play/open/select), your job is still to perform the SEARCH (find field, type query, submit). The system selects and activates the best matching result afterwards. Focus on getting accurate results on screen.
+Note on follow_up_action: if the situation includes a follow_up_action (play/open/select/send_message),
+your job is still to perform the SEARCH (find field, type query, submit). The system selects and
+activates the best matching result and/or sends the message afterwards. Focus on getting results on screen.
+For send_message: search for the contact name, submit, and stop. The system navigates to the chat and sends.
 
 Example (search a media app and play - just do the search; the system plays the best result):
 {{"goal":"generic_search","target_app":"spotify","visual_demo_mode":true,"confidence":0.85,"needs_confirmation":false,"rationale_short":"open spotify, type the query into search and submit","actions":[{{"op":"ensure_window","target":{{"selector_id":null,"semantic_role":null}},"args":{{"app_name":"spotify"}}}},{{"op":"find_control","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{}}}},{{"op":"type_text","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{"text":"narcos","clear_first":true}}}},{{"op":"send_hotkey","target":{{"selector_id":null,"semantic_role":null}},"args":{{"keys":"enter"}}}}],"postconditions":[{{"type":"results_appeared","description":"search results are shown","args":{{"contains_any":["narcos"]}}}}]}}
+
+Example (messaging app - search for a contact; system opens chat and sends message):
+{{"goal":"generic_search","target_app":"beeper","visual_demo_mode":true,"confidence":0.85,"needs_confirmation":true,"rationale_short":"invoke search chats, type contact name, submit","actions":[{{"op":"ensure_window","target":{{"selector_id":null,"semantic_role":null}},"args":{{"app_name":"beeper"}}}},{{"op":"invoke_control","target":{{"selector_id":null,"semantic_role":"named_control"}},"args":{{"name":"Search Chats"}}}},{{"op":"find_control","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{}}}},{{"op":"type_text","target":{{"selector_id":null,"semantic_role":"search_or_input"}},"args":{{"text":"gaston","clear_first":true}}}},{{"op":"send_hotkey","target":{{"selector_id":null,"semantic_role":null}},"args":{{"keys":"enter"}}}}],"postconditions":[{{"type":"results_appeared","description":"contact list shows the search result","args":{{"contains_any":["gaston"]}}}}]}}
 """
 
 
@@ -81,6 +87,7 @@ def build_messages(ctx: PlannerContext) -> list[dict[str, str]]:
         "text_or_query": hint.payload,
         "named_control_guess": hint.query,
         "follow_up_action": hint.then,
+        "message_to_send": getattr(hint, "message", None),
         "visual_demo_mode": ctx.visual_demo_mode,
         "current_window": ctx.window,
         "observed_controls": (ctx.observation or {}).get("actionable_controls", []),
@@ -92,6 +99,12 @@ def build_messages(ctx: PlannerContext) -> list[dict[str, str]]:
         "Here is the current situation. Reply with ONLY the next plan JSON object.\n"
         + json.dumps(payload, ensure_ascii=False)
     )
+    if ctx.consensus_agent_index is not None and ctx.consensus_agent_count:
+        user += (
+            f"\n\nYou are independent planner agent {ctx.consensus_agent_index + 1} of "
+            f"{ctx.consensus_agent_count}. Evaluate the situation on your own; other agents "
+            "are doing the same in parallel. Only high-confidence plans should be emitted."
+        )
     return [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": user},

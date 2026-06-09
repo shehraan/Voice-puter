@@ -1,9 +1,10 @@
 """Fast goal shortlist.
 
 Heuristic layer that guesses the goal category and pulls out the target app, the
-payload (text/query), and any trailing follow-up action (e.g. "and play it") before the
-planner runs. This is a hint only - the planner still grounds every action against the
-observed UI tree (architecture.md goal-shortlist section).
+payload (text/query/contact), any trailing follow-up action, and a message body for
+messaging commands — before the planner runs. This is a hint only; the planner still
+grounds every action against the observed UI tree (architecture.md goal-shortlist
+section).
 """
 from __future__ import annotations
 
@@ -23,10 +24,25 @@ _THEN_VERBS = {
     "pick": "select",
 }
 
-# Noise phrases to strip from an extracted query.
+# Noise phrases to strip from a music/media query.
 _QUERY_NOISE = (
     "the song", "the track", "the video", "a song", "a video", "the movie",
     "the album", "song", "for", "the best result", "best result", "the result",
+)
+
+# Matches a "send [him/her] a message [saying] <text>" tail.
+# Note: 'a' is separated from him/her/them to avoid consuming 'a message' as 'a ' pronoun.
+# The msg group uses a simple greedy capture; _clean_msg strips surrounding quotes.
+_SEND_MSG_PAT = re.compile(
+    r"[,.]?\s+(?:and\s+)?(?:then\s+)?send\s+(?:(?:him|her|them)\s+)?"
+    r"(?:a\s+)?(?:message|msg)\s*(?:saying|with|that\s+says)?\s*(?P<msg>.+?)\s*$",
+    re.IGNORECASE,
+)
+
+# Matches verbs that navigate TO something (find / click / go to / search for).
+_NAV_VERB = (
+    r"(?:search\s+(?:for\s+)?|find\s+(?:the\s+)?|click\s+(?:on\s+)?|"
+    r"go\s+to\s+|navigate\s+to\s+|open\s+)"
 )
 
 
@@ -34,9 +50,10 @@ _QUERY_NOISE = (
 class GoalHint:
     goal: GoalType
     target_app: str | None = None
-    payload: str | None = None  # text to type / query to search
-    query: str | None = None  # named control / result selector phrase
-    then: str | None = None  # follow-up action after search: play|open|select
+    payload: str | None = None    # text to type / query to search / contact name
+    query: str | None = None      # named control / result selector phrase
+    then: str | None = None       # follow-up action: play|open|select|send_message
+    message: str | None = None    # message body for messaging follow-ups
 
 
 def _clean_app(name: str | None) -> str | None:
@@ -59,11 +76,23 @@ def _clean_query(q: str | None) -> str | None:
     return q.strip(" .,!\"'") or None
 
 
+def _clean_msg(m: str | None) -> str | None:
+    if not m:
+        return None
+    return m.strip().strip("\"'").strip() or None
+
+
+def _strip_contact_nav(s: str) -> str:
+    """Remove leading navigation verb + article from a contact/chat name."""
+    s = re.sub(r"^(?:the\s+)?(?:chat|contact|person|user)?\s*(?:named\s+)?", "", s, flags=re.IGNORECASE)
+    return s.strip().strip("\"'").strip()
+
+
 def _extract_then(t: str) -> tuple[str, str | None]:
     """Split off a trailing follow-up action like 'and play it'.
 
-    Returns (remaining_text, then_action). Matches '... and <verb> [it|the result|...]'
-    at the end of the command.
+    Returns (remaining_text, then_action). Only matches media-style verbs;
+    messaging follow-ups are handled by the _SEND_MSG_PAT path.
     """
     m = re.search(
         r"\s+(?:and|then)\s+(play|open|select|start|launch|choose|pick)\b"
@@ -79,7 +108,47 @@ def _extract_then(t: str) -> tuple[str, str | None]:
 
 def shortlist(normalized: str) -> GoalHint:
     t = normalized.strip()
+
+    # ── Messaging compound commands ────────────────────────────────────────────
+    # Detect "send [a] message [saying] <text>" tail first, then parse the prefix.
+    msg_m = _SEND_MSG_PAT.search(t)
+    if msg_m:
+        msg = _clean_msg(msg_m.group("msg"))
+        prefix = t[: msg_m.start()].strip()
+        # prefix: "open <app> and [search for|find|click on] [the] [chat named] <contact>"
+        p = re.match(
+            r"^(?:open|launch|start|go to)\s+(?P<app>.+?)\s+and\s+" + _NAV_VERB +
+            r"(?:the\s+)?(?:chat|contact|person|user)?\s*(?:named\s+)?"
+            r"['\"]?(?P<contact>.+?)['\"]?\s*$",
+            prefix,
+            re.IGNORECASE,
+        )
+        if p:
+            return GoalHint(
+                GoalType.generic_search,
+                _clean_app(p.group("app")),
+                _clean_query(_strip_contact_nav(p.group("contact"))),
+                then="send_message",
+                message=msg,
+            )
+        # fallback: just an open + message with no contact navigation
+        p2 = re.match(r"^(?:open|launch|start|go to)\s+(?P<app>.+)$", prefix, re.IGNORECASE)
+        if p2:
+            return GoalHint(
+                GoalType.generic_text_entry,
+                _clean_app(p2.group("app")),
+                msg,
+            )
+
+    # ── Media: trailing 'and play/open it' ────────────────────────────────────
     t, then = _extract_then(t)
+
+    # open/launch <app> and play <query>
+    m = re.search(
+        r"\b(?:open|launch|start)\s+(?P<app>.+?)\s+and\s+(?:play|listen\s+to|stream)\s+(?P<q>.+)$", t
+    )
+    if m:
+        return GoalHint(GoalType.generic_search, _clean_app(m.group("app")), _clean_query(m.group("q")), then="play")
 
     # open/launch <app> and search (for) <query>
     m = re.search(

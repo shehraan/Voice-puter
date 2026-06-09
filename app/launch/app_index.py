@@ -59,6 +59,22 @@ APP_INDEX: dict[str, dict] = {
         "launch": ["wt"],
         "exe": ["windowsterminal.exe", "cmd.exe", "powershell.exe"],
     },
+    "feishin": {
+        "aliases": ["feishin", "my music app", "music player", "music server"],
+        "launch": ["feishin"],
+        "exe": ["feishin.exe"],
+        # Feishin exposes 'Edit name=Search' via ValuePattern; no search shortcut
+        # needed — the generic UIA path writes directly to the field.
+    },
+    "beeper": {
+        "aliases": ["beeper", "messages", "chat app", "messaging app"],
+        "launch": ["beeper"],
+        "exe": ["beeper.exe"],
+        # Beeper is an Electron messaging app. Searching for a contact uses the
+        # 'Search Chats' button (Invoke), then a text field appears. After selecting
+        # the chat, the compose field (unnamed Edit) accepts the message.
+        "needs_confirmation_for": ["send_message"],
+    },
 }
 
 
@@ -86,3 +102,5 @@ def search_plays_on_enter(app_name: str) -> bool:
     """True when submitting the app's quick-search plays the top result directly."""
     indexed = lookup(app_name)
     return bool(indexed[1].get("search_plays_on_enter")) if indexed else False
+
+
